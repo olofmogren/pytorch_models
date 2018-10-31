@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 
-Convolutional auto-encoder.
+Deep convolutional network.
 
 Author Olof Mogren, olof@mogren.one
 
@@ -28,79 +28,133 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class DeepEncoderModel(nn.Module):
+class DeepConvEncoderModel(nn.Module):
   '''
      Dimensions are given by channels, imgdim1, imgdim2 and pooling_factor.
      Pooling divides spatial dimensions by pooling_factor.
      Convolutional layers use padding and have the same output dimension as input dimension.
   '''
   def __init__(self, model_spec, use_cuda):
-    super(DeepEncoderModel, self).__init__()
+    super(DeepConvEncoderModel, self).__init__()
+    default_activation_conv = 'leaky_relu'
+    default_activation_fc   = 'tanh'
     
-    self.pooling_factor = model_spec.get('pooling_factor', 2)
+    self.spec = model_spec
+
+    self.training = True
+
+    self.spec.setdefault('pooling_factor', 2)
     # filter sizes are assumed to be odd numbers, for even padding.
-    self.filter_size_1 = model_spec.get('filter_size_1', 3)
-    self.padding_1 = int((self.filter_size_1-1)/2)
-    self.num_filters_1 = model_spec.get('num_filters_1', 16) #9#6
-    self.filter_size_2 = model_spec.get('filter_size_2', 5)
-    self.padding_2 = int((self.filter_size_2-1)/2)
-    self.num_filters_2 = model_spec.get('num_filters_2', 32) #16
-    self.fc1_size = model_spec.get('fc_size', 140) #120#*2
-    self.fc2_size = model_spec.get('encoding_size', 100) #84*2
-    self.imgdim1 = model_spec.get('imgdim1', 32)
-    self.imgdim2 = model_spec.get('imgdim2', 32)
-    self.channels = model_spec.get('channels', 3)
+    self.spec.setdefault('filter_sizes', [5])
+    self.paddings = [int((fs-1)/2) for fs in self.spec['filter_sizes']]
+    self.spec.setdefault('num_filters', [256]) #9#6
+    self.spec.setdefault('fc_sizes', [256, 100]) #120#*2
+    self.spec.setdefault('imgdim1', 32)
+    self.spec.setdefault('imgdim2', 32)
+    self.spec.setdefault('channels', 3)
+    self.spec.setdefault('resnet', True)
+    self.spec.setdefault('dropout', .5)
+    self.spec.setdefault('batchnorm', True)
+
+    self.spec.setdefault('activation_conv', 'leaky_relu')
+    self.spec.setdefault('activation_fc',   'tanh')
+    self.spec.setdefault('activation_out',  'tanh')
         
-    if model_spec['activation_conv'] == 'linear':
-      self.activation_conv   = None
-    else:
-      self.activation_conv   = getattr(F, model_spec.get('activation_conv', 'leaky_relu'))
-    if model_spec['activation_fc'] == 'linear':
-      self.activation_fc     = None
-    else:
-      self.activation_fc     = getattr(F, model_spec.get('activation_fc', 'tanh'))
+    self.activation_conv = self.get_activation(self.spec['activation_conv'])
+    self.activation_fc   = self.get_activation(self.spec['activation_fc'])
+    self.activation_out  = self.get_activation(self.spec['activation_out'])
 
-    self.spec = model_spec   
+    self.convs = nn.ModuleList()
+    self.batchnorms = nn.ModuleList()
 
-    self.conv1 = nn.Conv2d(self.channels, self.num_filters_1, self.filter_size_1, padding=self.padding_1)
+    channels = self.spec['channels']
+    for i in range(len(self.spec['filter_sizes'])):
+      while len(self.spec['num_filters']) <= i:
+        self.spec['num_filters'].append(self.spec['num_filters'][-1])
+      while len(self.paddings) <= i:
+        self.paddings.append(self.paddings[-1])
+      self.convs.append(nn.Conv2d(channels, self.spec['num_filters'][i], self.spec['filter_sizes'][i], padding=self.paddings[i]))
+      print('nn.Conv2d('+str(channels)+', '+str(self.spec['num_filters'][i])+', '+str(self.spec['filter_sizes'][i])+', padding='+str(self.paddings[i])+'))')
+      self.batchnorms.append(nn.BatchNorm2d(num_features=self.spec['num_filters'][i]))
+      channels = self.spec['num_filters'][i]
+    #self.encoder_weights.append((self.conv1.weight,self.conv1.bias))
     # padding. size constant.
-    self.pool = nn.MaxPool2d(self.pooling_factor, return_indices=True)
-    self.conv2 = nn.Conv2d(self.num_filters_1, self.num_filters_2, self.filter_size_2, padding=self.padding_2)
-    fc1_input_size = int(self.imgdim1/self.pooling_factor**2)*int(self.imgdim2/self.pooling_factor**2)*self.num_filters_2
-    self.fc1 = nn.Linear(fc1_input_size, self.fc1_size)
-    self.fc2 = nn.Linear(self.fc1_size, self.fc2_size)
+    self.pool = nn.MaxPool2d(self.spec['pooling_factor'], return_indices=True)
+    self.num_poolings = 2
+
+    if self.spec['dropout'] is not None:
+      self.dropout = nn.Dropout(p=self.spec['dropout'])
+
+    fc1_input_size = int(self.spec['imgdim1']/self.spec['pooling_factor']**self.num_poolings)*int(self.spec['imgdim2']/self.spec['pooling_factor']**self.num_poolings)*self.spec['num_filters'][-1]
+
+    self.fcs = nn.ModuleList()
+    sizes = [fc1_input_size]+self.spec['fc_sizes']
+    print(sizes)
+    for i in range(len(sizes)-1):
+      self.fcs.append(nn.Linear(sizes[i], sizes[i+1]))
+
+    for w in self.parameters():
+      #print('parameter {}'.format(w.size()))
+      if self.spec['init'] == 'xavier':
+        torch.nn.init.xavier_uniform_(w)
+      elif self.spec['init'] == 'uniform':
+        torch.nn.init.uniform_(w)
 
     if use_cuda:
-      self.conv1.cuda()
+      for i in range(len(self.convs)):
+        self.convs[i].cuda()
+        self.batchnorms[i].cuda()
       self.pool.cuda()
-      self.conv2.cuda()
-      self.fc1.cuda()
-      self.fc2.cuda()
+      for i in range(len(self.fcs)):
+        self.fcs[i].cuda()
+    print('Model: {} conv layers, {} fc layers. Output dimension {}.'.format(len(self.convs), len(self.fcs), self.spec['fc_sizes'][-1]))
 
   def forward(self, x):
     #print('before first conv layer: x: {}'.format(x.size()))
-    x = self.conv1(x)
-    if self.activation_conv is not None:
-      x = self.activation_conv(x)
-    #print('after first conv layer: {}'.format(x.size()))
-    x, indices_pool1 = self.pool(x)
-    #print('before second conv layer: {}'.format(x.size()))
-    x = self.conv2(x)
-    if self.activation_conv is not None:
-      x = self.activation_conv(x)
-    #print('after second conv layer: {}'.format(x.size()))
-    x, indices_pool2 = self.pool(x)
+    for i in range(len(self.convs)):
+      if i % 2 == 0:
+        prev = x
+      x = self.convs[i](x)
+      if i % 2 == 0 and self.spec['resnet']:
+        x = x+prev
+      if self.spec['batchnorm']:
+        x = self.batchnorms[i](x)
+      if self.activation_conv is not None:
+        x = self.activation_conv(x)
+      if self.spec['dropout'] is not None:
+        x = self.dropout(x)
+      #print('after first conv layer: {}'.format(x.size()))
+      if not self.spec['pooling_factor'] == 1 and i < self.num_poolings:
+        x, indices_pool1 = self.pool(x)
     #print('before coding layer: {}'.format(x.size()))
     x = x.view(x.size()[0], -1)
     #print('before fc1: {}'.format(x.size()))
-    x = self.fc1(x)
-    if self.activation_fc is not None:
-      x = self.activation_fc(x)
-    x = self.fc2(x)
-    if self.activation_fc is not None:
-      x = self.activation_fc(x)
-    
-    return x
+    for i in range(len(self.fcs)):
+      x = self.fcs[i](x)
+      if i == len(self.fcs)-1:
+        if self.activation_out is not None:
+          x = self.activation_out(x)
+      else:
+        if self.activation_fc is not None:
+          x = self.activation_fc(x)
+        reps = x
+    return x, reps
+
+  def eval(self):
+    super(DeepConvEncoderModel, self).eval()
+    self.trainng = False
+
+  def train(self):
+    super(DeepConvEncoderModel, self).train()
+    self.training = True
+
   def get_spec(self):
     return self.spec
 
+  def get_activation(self, label):
+    if label == 'linear':
+      return None
+    elif label == 'logsoftmax':
+      return nn.LogSoftmax(dim=-1)
+    else:
+     return getattr(torch, label)
