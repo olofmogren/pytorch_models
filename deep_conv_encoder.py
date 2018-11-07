@@ -40,6 +40,7 @@ class DeepConvEncoderModel(nn.Module):
     default_activation_fc   = 'tanh'
     
     self.spec = model_spec
+    self.use_cuda = use_cuda
 
     self.training = True
 
@@ -53,7 +54,7 @@ class DeepConvEncoderModel(nn.Module):
     self.spec.setdefault('imgdim2', 32)
     self.spec.setdefault('channels', 3)
     self.spec.setdefault('resnet', True)
-    self.spec.setdefault('dropout', .5)
+    self.spec.setdefault('dropout', None)
     self.spec.setdefault('batchnorm', True)
 
     self.spec.setdefault('activation_conv', 'leaky_relu')
@@ -83,7 +84,7 @@ class DeepConvEncoderModel(nn.Module):
     self.num_poolings = 2
 
     if self.spec['dropout'] is not None:
-      self.dropout = nn.Dropout(p=self.spec['dropout'])
+      self.dropout = nn.Dropout(p=self.spec['dropout'], inplace=False)
 
     fc1_input_size = int(self.spec['imgdim1']/self.spec['pooling_factor']**self.num_poolings)*int(self.spec['imgdim2']/self.spec['pooling_factor']**self.num_poolings)*self.spec['num_filters'][-1]
 
@@ -100,7 +101,7 @@ class DeepConvEncoderModel(nn.Module):
       elif self.spec['init'] == 'uniform':
         torch.nn.init.uniform_(w)
 
-    if use_cuda:
+    if self.use_cuda:
       for i in range(len(self.convs)):
         self.convs[i].cuda()
         self.batchnorms[i].cuda()
@@ -121,7 +122,13 @@ class DeepConvEncoderModel(nn.Module):
         x = self.batchnorms[i](x)
       if self.activation_conv is not None:
         x = self.activation_conv(x)
-      if self.spec['dropout'] is not None:
+      if self.spec['dropout'] is not None and self.training:
+        #keep = torch.empty(x.size()).uniform_(0, 1) > self.spec['dropout']
+        #keep = keep.cuda() if self.use_cuda else keep
+        #z = torch.zeros(x.size())
+        #z = z.cuda() if self.use_cuda else z
+        #x = torch.where(keep, x, z)
+        #x = x*(1/(1-self.spec['dropout']))
         x = self.dropout(x)
       #print('after first conv layer: {}'.format(x.size()))
       if not self.spec['pooling_factor'] == 1 and i < self.num_poolings:
@@ -140,13 +147,17 @@ class DeepConvEncoderModel(nn.Module):
         reps = x
     return x, reps
 
+  def cuda(self):
+    super(DeepConvEncoderModel, self).cuda()
+    self.use_cuda = True
+
   def eval(self):
     super(DeepConvEncoderModel, self).eval()
     self.trainng = False
 
-  def train(self):
-    super(DeepConvEncoderModel, self).train()
-    self.training = True
+  def train(self, choice):
+    super(DeepConvEncoderModel, self).train(choice)
+    self.training = choice
 
   def get_spec(self):
     return self.spec

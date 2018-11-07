@@ -1,4 +1,4 @@
-import sys
+import sys, datetime
 from subprocess import Popen,PIPE
 
 
@@ -11,3 +11,5 @@ def log_details():
   res_out,res_err = p.communicate()
   print("{}: git commit: {}".format(datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S'), res_out.decode()))
 
+def log_string(s):
+  print("{}: git commit: {}".format(datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S'), s))
