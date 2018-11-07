@@ -12,4 +12,4 @@ def log_details():
   print("{}: git commit: {}".format(datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S'), res_out.decode()))
 
 def log_string(s):
-  print("{}: git commit: {}".format(datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S'), s))
+  print("{}: {}".format(datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S'), s))
